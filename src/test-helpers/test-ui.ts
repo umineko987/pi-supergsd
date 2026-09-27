@@ -7,9 +7,20 @@ import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 export class TestUi {
   #lastNotification: string | undefined;
   #lastStatus: string | undefined;
+  #nextSelection: string | undefined;
+  #lastSelectOptions: string[] | undefined;
 
   readonly context: ExtensionUIContext = {
     ...noOpContext,
+    select: async (_title, options) => {
+      this.#lastSelectOptions = options;
+      const selected = this.#nextSelection;
+      this.#nextSelection = undefined;
+      if (selected && !options.includes(selected)) {
+        throw new Error(`Unexpected selection: ${selected}`);
+      }
+      return selected;
+    },
     notify: (message: string) => {
       this.#lastNotification = normalizeText(message);
     },
@@ -25,6 +36,14 @@ export class TestUi {
 
   get lastNotification(): string | undefined {
     return this.#lastNotification;
+  }
+
+  selectNext(option: string): void {
+    this.#nextSelection = option;
+  }
+
+  get lastSelectOptions(): string[] | undefined {
+    return this.#lastSelectOptions;
   }
 }
 

@@ -7,6 +7,7 @@ import {
   cmdFinishTask,
   toolPushTask,
   cmdStartTask,
+  cmdTaskModel,
   rendererTaskResult,
   setSkillsFromEvent,
   setModelRegistry,
@@ -16,6 +17,7 @@ import {
 export default function register(pi: ExtensionAPI): void {
   pi.registerTool(toolPushTask(pi));
   pi.registerCommand("start-task", cmdStartTask(pi));
+  pi.registerCommand("task-model", cmdTaskModel());
   pi.registerCommand("discard-task", cmdDiscardTask(pi));
   pi.registerCommand("finish-task", cmdFinishTask(pi));
   pi.registerCommand("abort-task", cmdAbortTask(pi));

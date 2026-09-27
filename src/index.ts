@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 
 import { join } from "node:path";
 
@@ -109,6 +109,34 @@ export function cmdStartTask(pi: TaskCommandAPI): CommandOptions {
       await ctx.waitForIdle();
       const modelArg = args.trim() || undefined;
       await startTask(pi, ctx, { modelArg });
+    },
+  };
+}
+
+export function cmdTaskModel(): CommandOptions {
+  return {
+    description: "Choose the default model for pushed tasks",
+    handler: async (_args: string, ctx: ExtensionCommandContext) => {
+      if (!ctx.hasUI) {
+        ctx.ui.notify("/task-model requires an interactive UI.", "warning");
+        return;
+      }
+      if (!readSettings(ctx)) return;
+
+      const models = ctx.modelRegistry.getAvailable().map((m) => `${m.provider}/${m.id}`);
+      const selected = await ctx.ui.select("Default task model", [CLEAR_TASK_MODEL, ...models]);
+      if (selected === undefined) return;
+      if (selected !== CLEAR_TASK_MODEL && !models.includes(selected)) {
+        ctx.ui.notify(`Model not available: ${selected}.`, "warning");
+        return;
+      }
+
+      const model = selected === CLEAR_TASK_MODEL ? undefined : selected;
+      if (!saveDefaultTaskModel(ctx, model)) return;
+      ctx.ui.notify(
+        model ? `Default task model set to ${model}.` : "Default task model cleared.",
+        "info",
+      );
     },
   };
 }
@@ -337,6 +365,8 @@ export function setModelRegistry(mr: ModelRegistry): void {
   modelRegistry = mr;
 }
 
+const CLEAR_TASK_MODEL = "Use current model (clear default)";
+
 const AUTO_AGENT_START_TIMEOUT_MS = 60_000;
 
 type CommandOptions = Omit<RegisteredCommand, "name" | "sourceInfo">;
@@ -470,26 +500,59 @@ async function startTask(
 
 /** Read the extension's persisted setting; null means a configured value could not be used. */
 function readDefaultTaskModel(ctx: ExtensionCommandContext): string | null | undefined {
-  const path = join(getAgentDir(), "settings.json");
-  let settings: unknown;
-  try {
-    settings = JSON.parse(readFileSync(path, "utf8").replace(/^\uFEFF/, ""));
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-    ctx.ui.notify(`Cannot read ${path}: ${String(error)}`, "warning");
-    return null;
-  }
+  const settings = readSettings(ctx);
+  if (!settings) return null;
 
-  const model =
-    isRecord(settings) && isRecord(settings.piSupergsd)
-      ? settings.piSupergsd.defaultTaskModel
-      : undefined;
+  const model = isRecord(settings.piSupergsd) ? settings.piSupergsd.defaultTaskModel : undefined;
   if (model === undefined) return undefined;
   if (typeof model !== "string" || !model.trim()) {
     ctx.ui.notify("Invalid piSupergsd.defaultTaskModel in settings.json.", "warning");
     return null;
   }
   return model.trim();
+}
+
+function saveDefaultTaskModel(ctx: ExtensionCommandContext, model: string | undefined): boolean {
+  const settings = readSettings(ctx);
+  if (!settings) return false;
+
+  const current = settings.piSupergsd;
+  if (current !== undefined && (!isRecord(current) || Array.isArray(current))) {
+    ctx.ui.notify("Invalid piSupergsd setting in settings.json.", "warning");
+    return false;
+  }
+  const pluginSettings: Record<string, unknown> = { ...(current ?? {}) };
+  if (model) pluginSettings.defaultTaskModel = model;
+  else delete pluginSettings.defaultTaskModel;
+
+  if (Object.keys(pluginSettings).length > 0) settings.piSupergsd = pluginSettings;
+  else delete settings.piSupergsd;
+
+  try {
+    mkdirSync(getAgentDir(), { recursive: true });
+    writeFileSync(join(getAgentDir(), "settings.json"), `${JSON.stringify(settings, null, 2)}\n`);
+    return true;
+  } catch (error) {
+    ctx.ui.notify(`Cannot save default task model: ${String(error)}`, "warning");
+    return false;
+  }
+}
+
+function readSettings(ctx: ExtensionCommandContext): Record<string, unknown> | null {
+  const path = join(getAgentDir(), "settings.json");
+  let settings: unknown;
+  try {
+    settings = JSON.parse(readFileSync(path, "utf8").replace(/^\uFEFF/, ""));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
+    ctx.ui.notify(`Cannot read ${path}: ${String(error)}`, "warning");
+    return null;
+  }
+  if (!isRecord(settings) || Array.isArray(settings)) {
+    ctx.ui.notify(`Invalid ${path}: expected a JSON object.`, "warning");
+    return null;
+  }
+  return settings;
 }
 
 async function discardTask(

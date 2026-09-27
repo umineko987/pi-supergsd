@@ -23,6 +23,7 @@ This extension also bundles a subset of [Superpowers](https://github.com/obra/su
 | Command               | Action                                                                               |
 | --------------------- | ------------------------------------------------------------------------------------ |
 | `/start-task [model]` | Saves a checkpoint and starts the pending task in a new branch                       |
+| `/task-model`         | Choose or clear the persistent default model for pushed tasks                        |
 | `/finish-task`        | Returns from task branch to saved checkpoint with the assistant response as a result |
 | `/abort-task`         | Returns from task branch to saved checkpoint without attaching any result            |
 | `/discard-task`       | Discards a pending task without executing it                                         |
@@ -32,7 +33,7 @@ If `[model]` is passed to `/start-task`, it overrides the default task model. Th
 
 ### Default task model
 
-To use a model for tasks started by `/start-task` without an argument or by `/auto`, add this extension-specific setting to Pi's user-level `~/.pi/agent/settings.json` (or the directory set by `PI_CODING_AGENT_DIR`):
+Run `/task-model` in an interactive Pi session to choose from models whose providers have authentication configured, or to clear the default and keep using the active model. This changes only future task starts, not the current session model. Alternatively, edit Pi's user-level `~/.pi/agent/settings.json` (or the directory set by `PI_CODING_AGENT_DIR`) directly:
 
 ```json
 {

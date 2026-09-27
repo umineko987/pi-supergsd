@@ -1,4 +1,5 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import assert from "node:assert";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -440,13 +441,108 @@ describe("model switching on /start-task", () => {
   });
 });
 
-async function withTaskSettings(settings: unknown, run: () => Promise<void>): Promise<void> {
+describe("/task-model configuration", () => {
+  it("selects from available Pi models and persists without switching the current model", async () => {
+    await withTaskSettings(
+      { theme: "default", piSupergsd: { otherSetting: true } },
+      async (path) => {
+        const h = await TestHarness.create();
+        registerTestModels(h, [{ id: "other-model", name: "Other Model" }]);
+        h.selectNext("supergsd-test/other-model");
+        h.llm.onPrompt("main work", responds("working..."), pushTask("AAA", "some prompt"));
+        h.llm.onPrompt("some prompt", responds("Done."));
+
+        try {
+          await h.prompt("/task-model");
+          h.assertSelectOptions(
+            "Use current model (clear default)",
+            ...h.modelRegistry.getAvailable().map((m) => `${m.provider}/${m.id}`),
+          );
+          assert.deepStrictEqual(JSON.parse(readFileSync(path, "utf8")), {
+            theme: "default",
+            piSupergsd: { otherSetting: true, defaultTaskModel: "supergsd-test/other-model" },
+          });
+          h.assertModel("supergsd-test/deterministic");
+
+          await h.prompt("main work");
+          await h.prompt("/start-task");
+          h.assertModel("supergsd-test/other-model");
+        } finally {
+          h.dispose();
+        }
+      },
+    );
+  });
+
+  it("clears the default while preserving other settings", async () => {
+    await withTaskSettings(
+      { theme: "default", piSupergsd: { otherSetting: true, defaultTaskModel: "other-model" } },
+      async (path) => {
+        const h = await TestHarness.create();
+        h.selectNext("Use current model (clear default)");
+        h.llm.onPrompt("main work", responds("working..."), pushTask("AAA", "some prompt"));
+        h.llm.onPrompt("some prompt", responds("Done."));
+
+        try {
+          await h.prompt("/task-model");
+          assert.deepStrictEqual(JSON.parse(readFileSync(path, "utf8")), {
+            theme: "default",
+            piSupergsd: { otherSetting: true },
+          });
+          await h.prompt("main work");
+          await h.prompt("/start-task");
+          h.assertModel("supergsd-test/deterministic");
+        } finally {
+          h.dispose();
+        }
+      },
+    );
+  });
+
+  it("creates settings.json when no Pi settings file exists", async () => {
+    await withTaskSettings({}, async (path) => {
+      rmSync(path);
+      const h = await TestHarness.create();
+      h.selectNext("supergsd-test/deterministic");
+      try {
+        await h.prompt("/task-model");
+        assert.deepStrictEqual(JSON.parse(readFileSync(path, "utf8")), {
+          piSupergsd: { defaultTaskModel: "supergsd-test/deterministic" },
+        });
+      } finally {
+        h.dispose();
+      }
+    });
+  });
+
+  it("leaves settings unchanged if the picker is cancelled", async () => {
+    await withTaskSettings(
+      { piSupergsd: { defaultTaskModel: "supergsd-test/deterministic" } },
+      async (path) => {
+        const h = await TestHarness.create();
+        const before = readFileSync(path, "utf8");
+        try {
+          await h.prompt("/task-model");
+          assert.strictEqual(readFileSync(path, "utf8"), before);
+        } finally {
+          h.dispose();
+        }
+      },
+    );
+  });
+});
+
+async function withTaskSettings(
+  settings: unknown,
+  run: (path: string) => Promise<void>,
+): Promise<void> {
   const agentDir = mkdtempSync(join(tmpdir(), "pi-supergsd-test-"));
   const previous = process.env.PI_CODING_AGENT_DIR;
   process.env.PI_CODING_AGENT_DIR = agentDir;
   try {
-    writeFileSync(join(agentDir, "settings.json"), JSON.stringify(settings));
-    await run();
+    const path = join(agentDir, "settings.json");
+    writeFileSync(path, JSON.stringify(settings));
+    await run(path);
   } finally {
     if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = previous;

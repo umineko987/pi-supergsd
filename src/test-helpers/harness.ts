@@ -132,6 +132,14 @@ export class TestHarness {
     assert.strictEqual(this.testUi.lastNotification, expected);
   }
 
+  selectNext(option: string): void {
+    this.testUi.selectNext(option);
+  }
+
+  assertSelectOptions(...expected: string[]): void {
+    assert.deepStrictEqual(this.testUi.lastSelectOptions, expected);
+  }
+
   assertModel(expected: string): void {
     const current = this.session.model;
     assert.ok(current, "Expected a model to be set, but none is active.");
