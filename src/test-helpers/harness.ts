@@ -139,6 +139,23 @@ export class TestHarness {
   assertSelectOptions(...expected: string[]): void {
     assert.deepStrictEqual(this.testUi.lastSelectOptions, expected);
   }
+  assertCustomSelectionVisible(expected: string, initial = false): void {
+    const view = initial ? this.testUi.firstCustomView : this.testUi.lastCustomView;
+    assert.ok(view);
+    assert.ok(
+      view.some((line) => line.startsWith(`→ ${expected}`)),
+      `Selection not visible: ${expected}`,
+    );
+    assert.ok(view.length <= 13, "Model list should fit in a bounded viewport");
+  }
+
+  setThinkingLevel(level: Parameters<typeof this.session.setThinkingLevel>[0]): void {
+    this.session.setThinkingLevel(level);
+  }
+
+  assertThinkingLevel(expected: string): void {
+    assert.strictEqual(this.session.thinkingLevel, expected);
+  }
 
   assertModel(expected: string): void {
     const current = this.session.model;

@@ -29,19 +29,22 @@ This extension also bundles a subset of [Superpowers](https://github.com/obra/su
 | `/discard-task`       | Discards a pending task without executing it                                         |
 | `/auto`               | EXPERIMENTAL! Runs all pending tasks hands-free, including any queued during the run |
 
-If `[model]` is passed to `/start-task`, it overrides the default task model. The selected model switches before the task prompt is sent. On `/finish-task` or `/abort-task`, the original model is restored.
+If `[model]` is passed to `/start-task`, it overrides the default task model and its thinking level. Task settings take effect before the task prompt is sent. On `/finish-task` or `/abort-task`, the original model and thinking level are restored.
 
 ### Default task model
 
-Run `/task-model` in an interactive Pi session to choose from models whose providers have authentication configured, or to clear the default and keep using the active model. This changes only future task starts, not the current session model. Alternatively, edit Pi's user-level `~/.pi/agent/settings.json` (or the directory set by `PI_CODING_AGENT_DIR`) directly:
+Run `/task-model` in an interactive Pi session to choose from models whose providers have authentication configured. The model list scrolls with the selected item; after choosing a model, choose a supported thinking level or use Pi's normal thinking level for that model. Clearing the default keeps using the active model and thinking level. This changes only future task starts, not the current session. Alternatively, edit Pi's user-level `~/.pi/agent/settings.json` (or the directory set by `PI_CODING_AGENT_DIR`) directly:
 
 ```json
 {
-  "piSupergsd": { "defaultTaskModel": "provider/modelId" }
+  "piSupergsd": {
+    "defaultTaskModel": "provider/modelId",
+    "defaultTaskThinkingLevel": "high"
+  }
 }
 ```
 
-Use the exact `provider/modelId` from `/model` to avoid ambiguous matches. An explicit `/start-task [model]` takes precedence; without this setting, tasks keep the active model. If the configured model cannot be selected, the task stays pending (`/auto` stops). Pi does not expose this extension-specific key in its `/settings` UI.
+`defaultTaskThinkingLevel` is optional; omit it to use Pi's model-specific thinking level. Use the exact `provider/modelId` from `/model` to avoid ambiguous matches. An explicit `/start-task [model]` takes precedence; without a configured default, tasks keep the active model and thinking level. If the configured model or thinking level cannot be selected, the task stays pending (`/auto` stops). Pi does not expose these extension-specific keys in its `/settings` UI.
 
 ### `push-task` tool
 

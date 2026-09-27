@@ -17,9 +17,9 @@ import {
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 
-import type { Api, Model } from "@earendil-works/pi-ai";
+import { getSupportedThinkingLevels, type Api, type Model } from "@earendil-works/pi-ai";
 
-import { Box, Text, type AutocompleteItem } from "@earendil-works/pi-tui";
+import { Box, Text, truncateToWidth, type AutocompleteItem } from "@earendil-works/pi-tui";
 
 import { Type, type Static } from "typebox";
 
@@ -121,20 +121,49 @@ export function cmdTaskModel(): CommandOptions {
         ctx.ui.notify("/task-model requires an interactive UI.", "warning");
         return;
       }
-      if (!readSettings(ctx)) return;
+      const settings = readSettings(ctx);
+      if (!settings) return;
 
-      const models = ctx.modelRegistry.getAvailable().map((m) => `${m.provider}/${m.id}`);
-      const selected = await ctx.ui.select("Default task model", [CLEAR_TASK_MODEL, ...models]);
+      const available = ctx.modelRegistry.getAvailable();
+      const models = available.map((m) => `${m.provider}/${m.id}`);
+      const saved = isRecord(settings.piSupergsd)
+        ? settings.piSupergsd.defaultTaskModel
+        : undefined;
+      const selected = await selectTaskModel(
+        ctx,
+        models,
+        typeof saved === "string" ? saved : undefined,
+      );
       if (selected === undefined) return;
-      if (selected !== CLEAR_TASK_MODEL && !models.includes(selected)) {
+
+      const model = available.find((m) => `${m.provider}/${m.id}` === selected);
+      if (selected !== CLEAR_TASK_MODEL && !model) {
         ctx.ui.notify(`Model not available: ${selected}.`, "warning");
         return;
       }
 
-      const model = selected === CLEAR_TASK_MODEL ? undefined : selected;
-      if (!saveDefaultTaskModel(ctx, model)) return;
+      let thinkingLevel: TaskThinkingLevel | undefined;
+      if (model) {
+        const levels = getSupportedThinkingLevels(model);
+        const selectedLevel = await ctx.ui.select(`Task thinking level for ${selected}`, [
+          USE_PI_THINKING,
+          ...levels,
+        ]);
+        if (selectedLevel === undefined) return;
+        if (selectedLevel !== USE_PI_THINKING) {
+          thinkingLevel = levels.find((level) => level === selectedLevel);
+          if (!thinkingLevel) {
+            ctx.ui.notify(`Thinking level not available: ${selectedLevel}.`, "warning");
+            return;
+          }
+        }
+      }
+
+      if (!saveDefaultTaskModel(ctx, model ? selected : undefined, thinkingLevel)) return;
       ctx.ui.notify(
-        model ? `Default task model set to ${model}.` : "Default task model cleared.",
+        model
+          ? `Default task model set to ${selected}${thinkingLevel ? ` (${thinkingLevel})` : ""}.`
+          : "Default task model cleared.",
         "info",
       );
     },
@@ -365,7 +394,7 @@ export function setModelRegistry(mr: ModelRegistry): void {
   modelRegistry = mr;
 }
 
-const CLEAR_TASK_MODEL = "Use current model (clear default)";
+const USE_PI_THINKING = "Use Pi's model thinking level";
 
 const AUTO_AGENT_START_TIMEOUT_MS = 60_000;
 
@@ -394,6 +423,61 @@ type AgentStartWaiter = {
   resolve: (started: boolean) => void;
   timeout: ReturnType<typeof setTimeout>;
 };
+
+async function selectTaskModel(
+  ctx: ExtensionCommandContext,
+  models: string[],
+  current: string | undefined,
+): Promise<string | undefined> {
+  const choices = [CLEAR_TASK_MODEL, ...models];
+  if ("mode" in ctx && ctx.mode !== "tui") return ctx.ui.select("Default task model", choices);
+
+  return ctx.ui.custom((tui, theme, keybindings, done) => {
+    let index = Math.max(0, choices.indexOf(current ?? CLEAR_TASK_MODEL));
+    const visible = 10;
+
+    return {
+      render(width: number) {
+        const start = Math.max(
+          0,
+          Math.min(index - Math.floor(visible / 2), choices.length - visible),
+        );
+        const end = Math.min(choices.length, start + visible);
+        const lines = [
+          truncateToWidth(theme.fg("accent", theme.bold("Default task model")), width),
+        ];
+        for (let i = start; i < end; i++) {
+          const label = `${i === index ? "→" : " "} ${choices[i]}`;
+          lines.push(truncateToWidth(i === index ? theme.fg("accent", label) : label, width));
+        }
+        if (choices.length > visible) {
+          lines.push(truncateToWidth(theme.fg("dim", `  (${index + 1}/${choices.length})`), width));
+        }
+        lines.push(
+          truncateToWidth(theme.fg("dim", "↑↓ navigate · Enter select · Esc cancel"), width),
+        );
+        return lines;
+      },
+      invalidate() {},
+      handleInput(data: string) {
+        if (keybindings.matches(data, "tui.select.up")) {
+          index = (index - 1 + choices.length) % choices.length;
+        } else if (keybindings.matches(data, "tui.select.down")) {
+          index = (index + 1) % choices.length;
+        } else if (keybindings.matches(data, "tui.select.confirm")) {
+          done(choices[index]);
+          return;
+        } else if (keybindings.matches(data, "tui.select.cancel")) {
+          done(undefined);
+          return;
+        }
+        tui.requestRender();
+      },
+    };
+  });
+}
+
+const CLEAR_TASK_MODEL = "Use current model (clear default)";
 
 function isFailedAssistantResponse(entry: AssistantMessageEntry): boolean {
   return entry.message.stopReason === "aborted" || entry.message.stopReason === "error";
@@ -431,10 +515,11 @@ async function startTask(
   }
 
   // ── Model switching ─────────────────────────────────────────────
-  const modelArg = options.modelArg ?? readDefaultTaskModel(ctx);
-  if (modelArg === null) return "blocked";
-
+  const preference = options.modelArg ? { model: options.modelArg } : readDefaultTaskModel(ctx);
+  if (preference === null) return "blocked";
+  const { model: modelArg, thinkingLevel } = preference;
   let previousModel: TaskStartData["previousModel"];
+  let previousThinkingLevel: TaskThinkingLevel | undefined;
   if (modelArg) {
     const matched = resolveModelPattern(modelArg, ctx.modelRegistry);
     if (matched === null) {
@@ -448,10 +533,15 @@ async function startTask(
       ctx.ui.notify(`Ambiguous model: matches ${names}.`, "warning");
       return "blocked";
     }
+    if (thinkingLevel && !getSupportedThinkingLevels(matched).includes(thinkingLevel)) {
+      ctx.ui.notify(`Thinking level ${thinkingLevel} is not available for ${modelArg}.`, "warning");
+      return "blocked";
+    }
 
     const currentModel = ctx.model;
     if (currentModel) {
       previousModel = { provider: currentModel.provider, modelId: currentModel.id };
+      previousThinkingLevel = pi.getThinkingLevel();
     }
 
     const switched = await pi.setModel(matched);
@@ -459,6 +549,7 @@ async function startTask(
       ctx.ui.notify(`No API key configured for ${matched.provider}/${matched.id}.`, "warning");
       return "blocked";
     }
+    if (thinkingLevel) pi.setThinkingLevel(thinkingLevel);
   }
 
   // ── Task start ──────────────────────────────────────────────────
@@ -478,6 +569,7 @@ async function startTask(
   };
   if (previousModel) {
     startEntryData.previousModel = previousModel;
+    startEntryData.previousThinkingLevel = previousThinkingLevel;
   }
   pi.appendEntry(TASK_START_ENTRY_TYPE, startEntryData);
 
@@ -499,20 +591,32 @@ async function startTask(
 }
 
 /** Read the extension's persisted setting; null means a configured value could not be used. */
-function readDefaultTaskModel(ctx: ExtensionCommandContext): string | null | undefined {
+function readDefaultTaskModel(ctx: ExtensionCommandContext): TaskModelPreference | null {
   const settings = readSettings(ctx);
   if (!settings) return null;
 
-  const model = isRecord(settings.piSupergsd) ? settings.piSupergsd.defaultTaskModel : undefined;
-  if (model === undefined) return undefined;
+  const pluginSettings = isRecord(settings.piSupergsd) ? settings.piSupergsd : {};
+  const model = pluginSettings.defaultTaskModel;
+  const thinkingLevel = pluginSettings.defaultTaskThinkingLevel;
+  if (model === undefined && thinkingLevel === undefined) return {};
   if (typeof model !== "string" || !model.trim()) {
     ctx.ui.notify("Invalid piSupergsd.defaultTaskModel in settings.json.", "warning");
     return null;
   }
-  return model.trim();
+  if (thinkingLevel !== undefined && typeof thinkingLevel !== "string") {
+    ctx.ui.notify("Invalid piSupergsd.defaultTaskThinkingLevel in settings.json.", "warning");
+    return null;
+  }
+  return { model: model.trim(), thinkingLevel: thinkingLevel as TaskThinkingLevel | undefined };
 }
 
-function saveDefaultTaskModel(ctx: ExtensionCommandContext, model: string | undefined): boolean {
+type TaskModelPreference = { model?: string; thinkingLevel?: TaskThinkingLevel };
+
+function saveDefaultTaskModel(
+  ctx: ExtensionCommandContext,
+  model: string | undefined,
+  thinkingLevel: TaskThinkingLevel | undefined,
+): boolean {
   const settings = readSettings(ctx);
   if (!settings) return false;
 
@@ -524,6 +628,8 @@ function saveDefaultTaskModel(ctx: ExtensionCommandContext, model: string | unde
   const pluginSettings: Record<string, unknown> = { ...(current ?? {}) };
   if (model) pluginSettings.defaultTaskModel = model;
   else delete pluginSettings.defaultTaskModel;
+  if (thinkingLevel) pluginSettings.defaultTaskThinkingLevel = thinkingLevel;
+  else delete pluginSettings.defaultTaskThinkingLevel;
 
   if (Object.keys(pluginSettings).length > 0) settings.piSupergsd = pluginSettings;
   else delete settings.piSupergsd;
@@ -661,6 +767,8 @@ async function restorePreviousModel(
   if (restoredModel) {
     if (!(await pi.setModel(restoredModel))) {
       ctx.ui.notify(`Failed to restore previous model ${provider}/${modelId}.`, "warning");
+    } else if (taskStart.data.previousThinkingLevel) {
+      pi.setThinkingLevel(taskStart.data.previousThinkingLevel);
     }
   } else {
     ctx.ui.notify(`Previous model ${provider}/${modelId} no longer available.`, "warning");
@@ -669,7 +777,12 @@ async function restorePreviousModel(
 
 type TaskCommandAPI = Pick<
   ExtensionAPI,
-  "appendEntry" | "sendMessage" | "sendUserMessage" | "setModel"
+  | "appendEntry"
+  | "sendMessage"
+  | "sendUserMessage"
+  | "setModel"
+  | "getThinkingLevel"
+  | "setThinkingLevel"
 >;
 
 function refreshTaskStatus(ctx: TaskStatusContext, options: TaskStatusOptions = {}): void {
@@ -837,6 +950,12 @@ function isTaskStartData(value: unknown): value is TaskStartData {
   ) {
     return false;
   }
+  if (
+    value.previousThinkingLevel !== undefined &&
+    typeof value.previousThinkingLevel !== "string"
+  ) {
+    return false;
+  }
   if (value.previousModel !== undefined) {
     return (
       isRecord(value.previousModel) &&
@@ -851,7 +970,10 @@ interface TaskStartData {
   title?: string;
   returnTo: string;
   previousModel?: { provider: string; modelId: string };
+  previousThinkingLevel?: TaskThinkingLevel;
 }
+
+type TaskThinkingLevel = ReturnType<ExtensionAPI["getThinkingLevel"]>;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;

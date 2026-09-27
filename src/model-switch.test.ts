@@ -61,6 +61,41 @@ describe("model switching on /start-task", () => {
     );
   });
 
+  it("applies task thinking level and restores the previous level on finish and abort", async () => {
+    await withTaskSettings(
+      {
+        piSupergsd: {
+          defaultTaskModel: "supergsd-test/deterministic",
+          defaultTaskThinkingLevel: "high",
+        },
+      },
+      async () => {
+        const h = await TestHarness.create();
+        h.llm.onPrompt("main work", responds("working..."), pushTask("AAA", "some prompt"));
+        h.llm.onPrompt("some prompt", responds("Done."));
+        h.llm.onPrompt("Done.", responds("Great!"), pushTask("BBB", "another prompt"));
+        h.llm.onPrompt("another prompt", responds("Another done."));
+
+        try {
+          h.setThinkingLevel("low");
+          await h.prompt("main work");
+          await h.prompt("/start-task");
+          h.assertThinkingLevel("high");
+
+          await h.prompt("/finish-task");
+          h.assertThinkingLevel("low");
+
+          await h.prompt("/start-task");
+          h.assertThinkingLevel("high");
+          await h.prompt("/abort-task");
+          h.assertThinkingLevel("low");
+        } finally {
+          h.dispose();
+        }
+      },
+    );
+  });
+
   it("lets an explicit /start-task model override the persisted default", async () => {
     await withTaskSettings({ piSupergsd: { defaultTaskModel: "missing-model" } }, async () => {
       const h = await TestHarness.create();
@@ -122,6 +157,33 @@ describe("model switching on /start-task", () => {
         h.dispose();
       }
     });
+  });
+
+  it("stops /auto and keeps the task pending when the thinking level is unsupported", async () => {
+    await withTaskSettings(
+      {
+        piSupergsd: {
+          defaultTaskModel: "supergsd-test/other-model",
+          defaultTaskThinkingLevel: "high",
+        },
+      },
+      async () => {
+        const h = await TestHarness.create();
+        registerTestModels(h, [{ id: "other-model", name: "Other Model" }]);
+        h.llm.onPrompt("main work", responds("working..."), pushTask("AAA", "some prompt"));
+        try {
+          await h.prompt("main work");
+          await h.prompt("/auto");
+          h.assertModel("supergsd-test/deterministic");
+          h.assertStatus("pending task: AAA");
+          h.assertLastNotification(
+            "Thinking level high is not available for supergsd-test/other-model.",
+          );
+        } finally {
+          h.dispose();
+        }
+      },
+    );
   });
 
   it("switches model and restores on finish (substring match)", async () => {
@@ -449,18 +511,21 @@ describe("/task-model configuration", () => {
         const h = await TestHarness.create();
         registerTestModels(h, [{ id: "other-model", name: "Other Model" }]);
         h.selectNext("supergsd-test/other-model");
+        h.selectNext("off");
         h.llm.onPrompt("main work", responds("working..."), pushTask("AAA", "some prompt"));
         h.llm.onPrompt("some prompt", responds("Done."));
 
         try {
           await h.prompt("/task-model");
-          h.assertSelectOptions(
-            "Use current model (clear default)",
-            ...h.modelRegistry.getAvailable().map((m) => `${m.provider}/${m.id}`),
-          );
+          h.assertCustomSelectionVisible("supergsd-test/other-model");
+          h.assertSelectOptions("Use Pi's model thinking level", "off");
           assert.deepStrictEqual(JSON.parse(readFileSync(path, "utf8")), {
             theme: "default",
-            piSupergsd: { otherSetting: true, defaultTaskModel: "supergsd-test/other-model" },
+            piSupergsd: {
+              otherSetting: true,
+              defaultTaskModel: "supergsd-test/other-model",
+              defaultTaskThinkingLevel: "off",
+            },
           });
           h.assertModel("supergsd-test/deterministic");
 
@@ -476,7 +541,14 @@ describe("/task-model configuration", () => {
 
   it("clears the default while preserving other settings", async () => {
     await withTaskSettings(
-      { theme: "default", piSupergsd: { otherSetting: true, defaultTaskModel: "other-model" } },
+      {
+        theme: "default",
+        piSupergsd: {
+          otherSetting: true,
+          defaultTaskModel: "other-model",
+          defaultTaskThinkingLevel: "high",
+        },
+      },
       async (path) => {
         const h = await TestHarness.create();
         h.selectNext("Use current model (clear default)");
@@ -504,11 +576,40 @@ describe("/task-model configuration", () => {
       rmSync(path);
       const h = await TestHarness.create();
       h.selectNext("supergsd-test/deterministic");
+      h.selectNext("high");
       try {
         await h.prompt("/task-model");
         assert.deepStrictEqual(JSON.parse(readFileSync(path, "utf8")), {
-          piSupergsd: { defaultTaskModel: "supergsd-test/deterministic" },
+          piSupergsd: {
+            defaultTaskModel: "supergsd-test/deterministic",
+            defaultTaskThinkingLevel: "high",
+          },
         });
+      } finally {
+        h.dispose();
+      }
+    });
+  });
+
+  it("keeps a long model list scrolled to the selected option, including on reopening", async () => {
+    await withTaskSettings({}, async () => {
+      const h = await TestHarness.create();
+      const models = Array.from({ length: 25 }, (_, i) => ({
+        id: `model-${i}`,
+        name: `Model ${i}`,
+      }));
+      registerTestModels(h, models);
+      try {
+        h.selectNext("supergsd-test/model-24");
+        h.selectNext("off");
+        await h.prompt("/task-model");
+        h.assertCustomSelectionVisible("Use current model (clear default)", true);
+        h.assertCustomSelectionVisible("supergsd-test/model-24");
+
+        h.selectNext("supergsd-test/model-24");
+        h.selectNext("off");
+        await h.prompt("/task-model");
+        h.assertCustomSelectionVisible("supergsd-test/model-24", true);
       } finally {
         h.dispose();
       }

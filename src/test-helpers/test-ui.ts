@@ -3,24 +3,71 @@ import { stripVTControlCharacters } from "node:util";
 import { Theme } from "@earendil-works/pi-coding-agent";
 
 import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
-
+import type { TUI } from "@earendil-works/pi-tui";
 export class TestUi {
   #lastNotification: string | undefined;
   #lastStatus: string | undefined;
-  #nextSelection: string | undefined;
+  #selections: string[] = [];
   #lastSelectOptions: string[] | undefined;
+  #firstCustomView: string[] | undefined;
+  #lastCustomView: string[] | undefined;
 
   readonly context: ExtensionUIContext = {
     ...noOpContext,
     select: async (_title, options) => {
       this.#lastSelectOptions = options;
-      const selected = this.#nextSelection;
-      this.#nextSelection = undefined;
+      const selected = this.#selections.shift();
       if (selected && !options.includes(selected)) {
         throw new Error(`Unexpected selection: ${selected}`);
       }
       return selected;
     },
+    custom: async (factory) =>
+      new Promise((done, reject) => {
+        void Promise.resolve(
+          factory(
+            { requestRender() {} } as TUI,
+            this.context.theme,
+            {
+              matches(data: string, binding: string) {
+                return (
+                  (
+                    {
+                      "tui.select.up": "\x1b[A",
+                      "tui.select.down": "\x1b[B",
+                      "tui.select.confirm": "\r",
+                      "tui.select.cancel": "\x1b",
+                    } as Record<string, string>
+                  )[binding] === data
+                );
+              },
+            } as Parameters<typeof factory>[2],
+            done,
+          ),
+        ).then((component) => {
+          try {
+            const choice = this.#selections.shift();
+            this.#firstCustomView = undefined;
+            for (let i = 0; i < 512; i++) {
+              const view = component.render(96).map((line) => normalizeText(line) ?? "");
+              this.#firstCustomView ??= view;
+              this.#lastCustomView = view;
+              if (choice === undefined) {
+                component.handleInput?.("\x1b");
+                return;
+              }
+              if (view.some((line) => line.startsWith(`→ ${choice}`))) {
+                component.handleInput?.("\r");
+                return;
+              }
+              component.handleInput?.("\x1b[B");
+            }
+            throw new Error(`Unable to select ${choice} in custom UI`);
+          } catch (error) {
+            reject(error);
+          }
+        }, reject);
+      }),
     notify: (message: string) => {
       this.#lastNotification = normalizeText(message);
     },
@@ -39,11 +86,18 @@ export class TestUi {
   }
 
   selectNext(option: string): void {
-    this.#nextSelection = option;
+    this.#selections.push(option);
   }
 
   get lastSelectOptions(): string[] | undefined {
     return this.#lastSelectOptions;
+  }
+  get firstCustomView(): string[] | undefined {
+    return this.#firstCustomView;
+  }
+
+  get lastCustomView(): string[] | undefined {
+    return this.#lastCustomView;
   }
 }
 
