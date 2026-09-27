@@ -1,5 +1,10 @@
+import { readFileSync } from "node:fs";
+
+import { join } from "node:path";
+
 import {
   defineTool,
+  getAgentDir,
   type ExtensionAPI,
   type ExtensionCommandContext,
   type MessageRenderer,
@@ -232,7 +237,7 @@ export function cmdAuto(pi: AutoCommandAPI): CommandOptions {
               statusPrefix: autoStatusOptions.prefix,
               waitForAgentStart,
             });
-            if (result === "cancelled" || result === "launch-timeout") break;
+            if (result) break;
             sawTaskActivity = true;
             continue;
           }
@@ -328,6 +333,12 @@ export function setSkillsFromEvent(s: Skill[]): void {
   }
 }
 
+export function setModelRegistry(mr: ModelRegistry): void {
+  modelRegistry = mr;
+}
+
+const AUTO_AGENT_START_TIMEOUT_MS = 60_000;
+
 type CommandOptions = Omit<RegisteredCommand, "name" | "sourceInfo">;
 
 type PushTaskAPI = Pick<ExtensionAPI, "appendEntry">;
@@ -354,8 +365,6 @@ type AgentStartWaiter = {
   timeout: ReturnType<typeof setTimeout>;
 };
 
-const AUTO_AGENT_START_TIMEOUT_MS = 60_000;
-
 function isFailedAssistantResponse(entry: AssistantMessageEntry): boolean {
   return entry.message.stopReason === "aborted" || entry.message.stopReason === "error";
 }
@@ -380,8 +389,6 @@ function findLastAssistantAfterTaskStart(
   return lastAssistant;
 }
 
-type AssistantMessageEntry = SessionMessageEntry & { message: { role: "assistant" } };
-
 async function startTask(
   pi: TaskCommandAPI,
   ctx: ExtensionCommandContext,
@@ -394,19 +401,22 @@ async function startTask(
   }
 
   // ── Model switching ─────────────────────────────────────────────
+  const modelArg = options.modelArg ?? readDefaultTaskModel(ctx);
+  if (modelArg === null) return "blocked";
+
   let previousModel: TaskStartData["previousModel"];
-  if (options.modelArg) {
-    const matched = resolveModelPattern(options.modelArg, ctx.modelRegistry);
+  if (modelArg) {
+    const matched = resolveModelPattern(modelArg, ctx.modelRegistry);
     if (matched === null) {
-      ctx.ui.notify(`No model matching "${options.modelArg}".`, "warning");
-      return;
+      ctx.ui.notify(`No model matching "${modelArg}".`, "warning");
+      return "blocked";
     }
     if (matched === "ambiguous") {
-      const names = matchModels(options.modelArg, ctx.modelRegistry)
+      const names = matchModels(modelArg, ctx.modelRegistry)
         .map((m) => `${m.provider}/${m.id}`)
         .join(", ");
       ctx.ui.notify(`Ambiguous model: matches ${names}.`, "warning");
-      return;
+      return "blocked";
     }
 
     const currentModel = ctx.model;
@@ -417,7 +427,7 @@ async function startTask(
     const switched = await pi.setModel(matched);
     if (!switched) {
       ctx.ui.notify(`No API key configured for ${matched.provider}/${matched.id}.`, "warning");
-      return;
+      return "blocked";
     }
   }
 
@@ -426,7 +436,7 @@ async function startTask(
   const freshTargetId = findFreshTargetId(ctx.sessionManager);
   if (!freshTargetId) {
     ctx.ui.notify("No starting point found on current branch.", "warning");
-    return;
+    return "blocked";
   }
 
   const result = await ctx.navigateTree(freshTargetId, { summarize: false });
@@ -456,6 +466,30 @@ async function startTask(
     );
     return "launch-timeout";
   }
+}
+
+/** Read the extension's persisted setting; null means a configured value could not be used. */
+function readDefaultTaskModel(ctx: ExtensionCommandContext): string | null | undefined {
+  const path = join(getAgentDir(), "settings.json");
+  let settings: unknown;
+  try {
+    settings = JSON.parse(readFileSync(path, "utf8").replace(/^\uFEFF/, ""));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    ctx.ui.notify(`Cannot read ${path}: ${String(error)}`, "warning");
+    return null;
+  }
+
+  const model =
+    isRecord(settings) && isRecord(settings.piSupergsd)
+      ? settings.piSupergsd.defaultTaskModel
+      : undefined;
+  if (model === undefined) return undefined;
+  if (typeof model !== "string" || !model.trim()) {
+    ctx.ui.notify("Invalid piSupergsd.defaultTaskModel in settings.json.", "warning");
+    return null;
+  }
+  return model.trim();
 }
 
 async function discardTask(
@@ -527,11 +561,6 @@ async function finishTask(
   refreshTaskStatus(ctx, { prefix: options.statusPrefix });
 }
 
-type TaskCommandAPI = Pick<
-  ExtensionAPI,
-  "appendEntry" | "sendMessage" | "sendUserMessage" | "setModel"
->;
-
 async function abortTask(
   pi: TaskCommandAPI,
   ctx: ExtensionCommandContext,
@@ -554,6 +583,8 @@ async function abortTask(
   refreshTaskStatus(ctx);
 }
 
+type TaskActionResult = "blocked" | "cancelled" | "launch-timeout" | void;
+
 /** Restore the model that was active before a task started, if one was recorded. */
 async function restorePreviousModel(
   pi: TaskCommandAPI,
@@ -573,7 +604,10 @@ async function restorePreviousModel(
   }
 }
 
-type TaskActionResult = "cancelled" | "launch-timeout" | void;
+type TaskCommandAPI = Pick<
+  ExtensionAPI,
+  "appendEntry" | "sendMessage" | "sendUserMessage" | "setModel"
+>;
 
 function refreshTaskStatus(ctx: TaskStatusContext, options: TaskStatusOptions = {}): void {
   if (ctx.hasUI) {
@@ -587,6 +621,8 @@ type TaskStatusContext = Pick<ExtensionCommandContext, "hasUI" | "sessionManager
 function isAssistantMessageEntry(entry: SessionEntry): entry is AssistantMessageEntry {
   return entry.type === "message" && entry.message.role === "assistant";
 }
+
+type AssistantMessageEntry = SessionMessageEntry & { message: { role: "assistant" } };
 
 /**
  * Find the target ID for navigating to a fresh context.
@@ -785,19 +821,6 @@ function resolveSkillRefs(prompt: string): ResolveResult {
   return { rewritten, unresolved: [...unresolvedSet] };
 }
 
-/** Case-insensitive substring match of `pattern` against each available model's id, name, or provider/id. */
-function matchModels(pattern: string, registry: ModelRegistry): Model<Api>[] {
-  const lower = pattern.toLowerCase();
-  return registry
-    .getAvailable()
-    .filter(
-      (m) =>
-        m.id.toLowerCase().includes(lower) ||
-        m.name.toLowerCase().includes(lower) ||
-        `${m.provider}/${m.id}`.toLowerCase().includes(lower),
-    );
-}
-
 interface ResolveResult {
   rewritten: string;
   unresolved: string[];
@@ -843,6 +866,19 @@ function getModelCompletions(argumentPrefix: string, registry: ModelRegistry): A
     }));
 }
 
+/** Case-insensitive substring match of `pattern` against each available model's id, name, or provider/id. */
+function matchModels(pattern: string, registry: ModelRegistry): Model<Api>[] {
+  const lower = pattern.toLowerCase();
+  return registry
+    .getAvailable()
+    .filter(
+      (m) =>
+        m.id.toLowerCase().includes(lower) ||
+        m.name.toLowerCase().includes(lower) ||
+        `${m.provider}/${m.id}`.toLowerCase().includes(lower),
+    );
+}
+
 const pushTaskParameters = Type.Object({
   title: Type.String({
     description: "Short task title shown in status, results, and tool rendering.",
@@ -859,7 +895,3 @@ let skills: Skill[] = [];
 let skillsExternallySet = false;
 
 let modelRegistry: ModelRegistry | undefined;
-
-export function setModelRegistry(mr: ModelRegistry): void {
-  modelRegistry = mr;
-}

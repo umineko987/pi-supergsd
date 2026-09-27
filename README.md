@@ -28,7 +28,19 @@ This extension also bundles a subset of [Superpowers](https://github.com/obra/su
 | `/discard-task`       | Discards a pending task without executing it                                         |
 | `/auto`               | EXPERIMENTAL! Runs all pending tasks hands-free, including any queued during the run |
 
-If `[model]` is passed to `/start-task`, the model switches before the task prompt is sent. On `/finish-task` or `/abort-task`, the original model is restored.
+If `[model]` is passed to `/start-task`, it overrides the default task model. The selected model switches before the task prompt is sent. On `/finish-task` or `/abort-task`, the original model is restored.
+
+### Default task model
+
+To use a model for tasks started by `/start-task` without an argument or by `/auto`, add this extension-specific setting to Pi's user-level `~/.pi/agent/settings.json` (or the directory set by `PI_CODING_AGENT_DIR`):
+
+```json
+{
+  "piSupergsd": { "defaultTaskModel": "provider/modelId" }
+}
+```
+
+Use the exact `provider/modelId` from `/model` to avoid ambiguous matches. An explicit `/start-task [model]` takes precedence; without this setting, tasks keep the active model. If the configured model cannot be selected, the task stays pending (`/auto` stops). Pi does not expose this extension-specific key in its `/settings` UI.
 
 ### `push-task` tool
 

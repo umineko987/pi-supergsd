@@ -1,3 +1,7 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { describe, it } from "node:test";
 
 import {
@@ -7,6 +11,7 @@ import {
   task,
   taskResult,
   user,
+  userCtrlC,
   TestHarness,
 } from "./test-helpers/index.js";
 
@@ -27,6 +32,95 @@ describe("model switching on /start-task", () => {
     } finally {
       h.dispose();
     }
+  });
+
+  it("uses a persisted default model for /start-task and restores it on finish", async () => {
+    await withTaskSettings(
+      { piSupergsd: { defaultTaskModel: "supergsd-test/other-model" } },
+      async () => {
+        const h = await TestHarness.create();
+        registerTestModels(h, [{ id: "other-model", name: "Other Model" }]);
+        h.llm.onPrompt("main work", responds("working..."), pushTask("AAA", "some prompt"));
+        h.llm.onPrompt("some prompt", responds("Done."));
+        h.llm.onPrompt("Done.", responds("Great!"));
+
+        try {
+          await h.prompt("main work");
+          await h.prompt("/start-task");
+          h.assertModel("supergsd-test/other-model");
+          h.assertSession(user("some prompt"), assistant("Done."));
+
+          await h.prompt("/finish-task");
+          h.assertModel("supergsd-test/deterministic");
+          h.assertStatus();
+        } finally {
+          h.dispose();
+        }
+      },
+    );
+  });
+
+  it("lets an explicit /start-task model override the persisted default", async () => {
+    await withTaskSettings({ piSupergsd: { defaultTaskModel: "missing-model" } }, async () => {
+      const h = await TestHarness.create();
+      registerTestModels(h, [{ id: "other-model", name: "Other Model" }]);
+      h.llm.onPrompt("main work", responds("working..."), pushTask("AAA", "some prompt"));
+      h.llm.onPrompt("some prompt", responds("Done."));
+
+      try {
+        await h.prompt("main work");
+        await h.prompt("/start-task supergsd-test/other-model");
+        h.assertModel("supergsd-test/other-model");
+        h.assertSession(user("some prompt"), assistant("Done."));
+      } finally {
+        h.dispose();
+      }
+    });
+  });
+
+  it("uses the persisted default model for /auto", async () => {
+    await withTaskSettings(
+      { piSupergsd: { defaultTaskModel: "supergsd-test/other-model" } },
+      async () => {
+        const h = await TestHarness.create();
+        registerTestModels(h, [{ id: "other-model", name: "Other Model" }]);
+        h.llm.onPrompt("main work", responds("working..."), pushTask("AAA", "some prompt"));
+        h.llm.onPrompt("some prompt", responds("Done."));
+        h.user.onAssistant("Done.", userCtrlC());
+
+        try {
+          await h.prompt("main work");
+          await h.prompt("/auto");
+          h.assertModel("supergsd-test/other-model");
+          h.assertSession(user("some prompt"), assistant("Done."));
+          h.assertStatus("current task: AAA");
+        } finally {
+          h.dispose();
+        }
+      },
+    );
+  });
+
+  it("stops /auto and keeps the task pending when the default model is unavailable", async () => {
+    await withTaskSettings({ piSupergsd: { defaultTaskModel: "missing-model" } }, async () => {
+      const h = await TestHarness.create();
+      h.llm.onPrompt("main work", responds("working..."), pushTask("AAA", "some prompt"));
+
+      try {
+        await h.prompt("main work");
+        await h.prompt("/auto");
+        h.assertModel("supergsd-test/deterministic");
+        h.assertSession(
+          user("main work"),
+          assistant("working...", "toolUse"),
+          task("AAA", "some prompt"),
+        );
+        h.assertStatus("pending task: AAA");
+        h.assertLastNotification('No model matching "missing-model".');
+      } finally {
+        h.dispose();
+      }
+    });
   });
 
   it("switches model and restores on finish (substring match)", async () => {
@@ -345,6 +439,20 @@ describe("model switching on /start-task", () => {
     }
   });
 });
+
+async function withTaskSettings(settings: unknown, run: () => Promise<void>): Promise<void> {
+  const agentDir = mkdtempSync(join(tmpdir(), "pi-supergsd-test-"));
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  try {
+    writeFileSync(join(agentDir, "settings.json"), JSON.stringify(settings));
+    await run();
+  } finally {
+    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previous;
+    rmSync(agentDir, { recursive: true, force: true });
+  }
+}
 
 /** Register extra test models under the supergsd-test provider. */
 function registerTestModels(h: TestHarness, models: Array<{ id: string; name: string }>) {
